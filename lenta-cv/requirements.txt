@@ -3,3 +3,6 @@ pandas
 opencv-python
 pytesseract
 easyocr
+torch
+torchvision
+Pillow

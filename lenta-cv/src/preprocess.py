@@ -55,8 +55,10 @@ def preprocess_one_image(image_name: str):
     gray_output_path = PROCESSED_DIR / f"{stem}_gray.jpg"
     threshold_output_path = PROCESSED_DIR / f"{stem}_threshold.jpg"
 
-    cv2.imwrite(str(gray_output_path), gray_resized)
-    cv2.imwrite(str(threshold_output_path), threshold)
+    if not cv2.imwrite(str(gray_output_path), gray_resized):
+        raise OSError(f"Failed to save image: {gray_output_path}")
+    if not cv2.imwrite(str(threshold_output_path), threshold):
+        raise OSError(f"Failed to save image: {threshold_output_path}")
 
     print(f"Сохранено: {gray_output_path}")
     print(f"Сохранено: {threshold_output_path}")
