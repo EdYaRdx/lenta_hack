@@ -1,86 +1,138 @@
 #!/usr/bin/env python
-"""Main entry point for running the complete pipeline: preprocess → OCR → parser."""
+"""Command-line entry point for recognizing Lenta price tag images."""
 
+import argparse
 import sys
 from pathlib import Path
+from typing import Any
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8")
 
-# Add project root to Python path
-project_root = Path(__file__).parent
-sys.path.insert(0, str(project_root))
+PROJECT_ROOT = Path(__file__).resolve().parent
+RAW_DIR = PROJECT_ROOT / "data" / "raw"
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 
-from src.preprocess import preprocess_one_image
-from src.ocr import extract_text
-from src.parser import parse_ocr_results
+sys.path.insert(0, str(PROJECT_ROOT))
+
+from src.exporter import save_results
 
 
-def run_full_pipeline(image_name: str = "price_01.jpg"):
-    """
-    Run complete pipeline: preprocess → OCR → parse results.
-    
-    Args:
-        image_name: Image filename (e.g., 'price_01.jpg')
-        
-    Returns:
-        Dict with parsed results
-    """
-    print("=" * 60)
-    print(f"🚀 Running full pipeline for: {image_name}")
-    print("=" * 60)
-    
-    # Step 1: Preprocess image
-    print("\n📸 STEP 1: Preprocessing image...")
-    print("-" * 60)
-    try:
-        preprocess_one_image(image_name)
-    except FileNotFoundError as e:
-        print(f"❌ Error: {e}")
+def find_raw_images() -> list[Path]:
+    """Return all supported raw image paths sorted by filename."""
+    if not RAW_DIR.exists():
+        return []
+
+    return sorted(
+        path
+        for path in RAW_DIR.iterdir()
+        if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS
+    )
+
+
+def resolve_raw_image(image_name: str) -> Path | None:
+    """Find an exact raw image or a supported image with the same stem."""
+    image_path = RAW_DIR / image_name
+    if image_path.exists():
+        return image_path
+
+    stem = Path(image_name).stem
+    for extension in sorted(IMAGE_EXTENSIONS):
+        candidate = RAW_DIR / f"{stem}{extension}"
+        if candidate.exists():
+            return candidate
+
+    return None
+
+
+def run_one_image(
+    image_name: str,
+    preprocess: bool = True,
+) -> tuple[dict[str, Any] | None, Path | None]:
+    """Parse one image, print its row, and save it to the result CSV."""
+    image_path = resolve_raw_image(image_name)
+    if image_path is None:
+        print(f"Error: image not found: {RAW_DIR / image_name}")
+        return None, None
+
+    from src.price_tag_parser import parse_price_tag
+
+    row = parse_price_tag(image_path.name, preprocess=preprocess)
+    print(row)
+
+    output_path = save_results([row])
+    print(f"Saved CSV: {output_path}")
+    return row, output_path
+
+
+def run_all_images(preprocess: bool = True) -> Path | None:
+    """Parse all raw images and save all rows to the result CSV."""
+    image_paths = find_raw_images()
+    if not image_paths:
+        print(f"No images found in {RAW_DIR}")
         return None
-    
-    # Step 2: Run OCR on preprocessed image
-    print("\n🔍 STEP 2: Running OCR on preprocessed image...")
-    print("-" * 60)
-    try:
-        ocr_results = extract_text(image_name, use_processed=True)
-    except FileNotFoundError as e:
-        print(f"❌ Error: {e}")
-        return None
-    
-    # Step 3: Parse OCR results
-    print("\n📊 STEP 3: Parsing OCR results...")
-    print("-" * 60)
-    
-    parsed = parse_ocr_results(ocr_results)
-    
-    # Display parsed results
-    print("\n✅ PARSED RESULTS:")
-    print("=" * 60)
-    
-    if parsed["price"] is not None:
-        print(f"💰 Price: {parsed['price']:.2f} руб")
-    else:
-        print("❌ Price: Not found")
-    
-    if parsed["date"] is not None:
-        print(f"📅 Date: {parsed['date']}")
-    else:
-        print("❌ Date: Not found")
-    
-    if parsed["code"] is not None:
-        print(f"🏷️  Product Code: {parsed['code']}")
-    else:
-        print("❌ Code: Not found")
-    
-    print("=" * 60)
-    
-    return parsed
+
+    from src.price_tag_parser import parse_price_tag
+
+    rows = [
+        parse_price_tag(path.name, preprocess=preprocess)
+        for path in image_paths
+    ]
+    output_path = save_results(rows)
+
+    print(f"Saved CSV: {output_path}")
+    print(f"Processed images: {len(rows)}")
+    return output_path
+
+
+def run_full_pipeline(
+    image_name: str = "price_02.jpg",
+    preprocess: bool = True,
+) -> dict[str, Any] | None:
+    """Backward-compatible wrapper for parsing one image."""
+    row, _ = run_one_image(image_name, preprocess=preprocess)
+    return row
+
+
+def build_arg_parser() -> argparse.ArgumentParser:
+    """Build the CLI argument parser."""
+    parser = argparse.ArgumentParser(
+        description="Recognize Lenta price tags and save results to CSV.",
+    )
+    parser.add_argument(
+        "image_name",
+        nargs="?",
+        default="price_02.jpg",
+        help="Image filename from data/raw. Defaults to price_02.jpg.",
+    )
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help="Process all supported images from data/raw.",
+    )
+    parser.add_argument(
+        "--no-preprocess",
+        action="store_true",
+        help="Skip preprocessing and use existing processed/raw images.",
+    )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Run the command-line interface."""
+    parser = build_arg_parser()
+    args = parser.parse_args(argv)
+    should_preprocess = not args.no_preprocess
+
+    if args.all:
+        run_all_images(preprocess=should_preprocess)
+        return 0
+
+    row, _ = run_one_image(args.image_name, preprocess=should_preprocess)
+    return 0 if row is not None else 1
 
 
 if __name__ == "__main__":
-    # Can run as: python run.py [image_name]
-    image_name = sys.argv[1] if len(sys.argv) > 1 else "price_02.jpg"
-    result = run_full_pipeline(image_name)
+    raise SystemExit(main())

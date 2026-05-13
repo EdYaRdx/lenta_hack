@@ -5,7 +5,7 @@ import re
 from typing import Any, Dict, List, Optional, Tuple
 
 
-OCRResult = Tuple[str, float]
+OCRResult = Dict[str, Any] | Tuple[str, float]
 
 PRICE_CONFIDENCE_THRESHOLD = 0.7
 DATE_CONFIDENCE_THRESHOLD = 0.4
@@ -14,6 +14,28 @@ CODE_CONFIDENCE_THRESHOLD = 0.9
 PRICE_SEPARATOR_CHARS = ".,рpРP₽"
 PRICE_UNITS_PATTERN = r"(?:руб\.?|rub|₽)"
 QUANTITY_UNITS_PATTERN = r"(?:шт\.?|штука|штук|kg|кг|г|л|мл)"
+
+
+def get_ocr_text(item: OCRResult) -> str:
+    """Return OCR text from dict or legacy tuple format."""
+    if isinstance(item, dict):
+        return str(item.get("text", ""))
+    return str(item[0])
+
+
+def get_ocr_confidence(item: OCRResult) -> float:
+    """Return OCR confidence from dict or legacy tuple format."""
+    if isinstance(item, dict):
+        return float(item.get("confidence", 0.0))
+    return float(item[1])
+
+
+def to_text_confidence_pairs(ocr_results: List[OCRResult]) -> List[Tuple[str, float]]:
+    """Convert OCR results to text/confidence pairs for parsing."""
+    return [
+        (get_ocr_text(item), get_ocr_confidence(item))
+        for item in ocr_results
+    ]
 
 
 def extract_price_from_results(
@@ -26,7 +48,8 @@ def extract_price_from_results(
     The parser prefers price-like numbers near currency markers and avoids
     quantity fragments like "1 ШТ".
     """
-    tokens = [(text.strip(), conf) for text, conf in ocr_results if conf >= confidence_threshold]
+    pairs = to_text_confidence_pairs(ocr_results)
+    tokens = [(text.strip(), conf) for text, conf in pairs if conf >= confidence_threshold]
     visible_tokens = [(text, conf) for text, conf in tokens if not text.startswith("__")]
     high_conf_text = " ".join(text for text, _ in visible_tokens)
     candidates: List[Tuple[int, float]] = []
@@ -180,7 +203,8 @@ def extract_date_from_results(
     confidence_threshold: float = DATE_CONFIDENCE_THRESHOLD,
 ) -> Optional[str]:
     """Extract a valid date in DD.MM.YYYY format from OCR results."""
-    high_conf_text = " ".join(text for text, conf in ocr_results if conf >= PRICE_CONFIDENCE_THRESHOLD)
+    pairs = to_text_confidence_pairs(ocr_results)
+    high_conf_text = " ".join(text for text, conf in pairs if conf >= PRICE_CONFIDENCE_THRESHOLD)
     date_pattern = r"(\d{2})\.(\d{2})\.(\d{4})"
 
     match = re.search(date_pattern, high_conf_text)
@@ -189,7 +213,7 @@ def extract_date_from_results(
         if is_valid_date(day, month, year):
             return f"{day}.{month}.{year}"
 
-    for text, conf in ocr_results:
+    for text, conf in pairs:
         if conf < confidence_threshold:
             continue
 
@@ -215,7 +239,7 @@ def extract_product_code_from_results(
     confidence_threshold: float = CODE_CONFIDENCE_THRESHOLD,
 ) -> Optional[str]:
     """Extract product code, usually a standalone 10+ digit number."""
-    for text, conf in ocr_results:
+    for text, conf in to_text_confidence_pairs(ocr_results):
         if conf >= confidence_threshold and re.fullmatch(r"\d{10,}", text):
             return text
 

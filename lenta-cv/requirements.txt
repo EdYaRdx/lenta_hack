@@ -1,8 +1,13 @@
-numpy
-pandas
-opencv-python
-pytesseract
-easyocr
-torch
-torchvision
-Pillow
+# Core data/image stack
+numpy==1.26.4
+pandas==2.2.2
+Pillow==10.4.0
+
+# Computer vision and OCR
+opencv-python-headless==4.10.0.84
+easyocr==1.7.2
+pytesseract==0.3.13
+
+# EasyOCR backend
+torch==2.3.1
+torchvision==0.18.1
