@@ -88,10 +88,14 @@ def run_all_images(preprocess: bool = True) -> Path | None:
 
 
 def run_full_pipeline(
-    image_name: str = "price_02.jpg",
+    image_name: str | None = None,
     preprocess: bool = True,
-) -> dict[str, Any] | None:
-    """Backward-compatible wrapper for parsing one image."""
+) -> dict[str, Any] | list[dict[str, Any]] | None:
+    """Backward-compatible wrapper for parsing one image or all images."""
+    if image_name is None:
+        run_all_images(preprocess=preprocess)
+        return None
+
     row, _ = run_one_image(image_name, preprocess=preprocess)
     return row
 
@@ -104,8 +108,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "image_name",
         nargs="?",
-        default="price_02.jpg",
-        help="Image filename from data/raw. Defaults to price_02.jpg.",
+        default=None,
+        help="Image filename from data/raw. If omitted, all raw images are processed.",
     )
     parser.add_argument(
         "--all",
@@ -126,7 +130,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     should_preprocess = not args.no_preprocess
 
-    if args.all:
+    if args.all or args.image_name is None:
         run_all_images(preprocess=should_preprocess)
         return 0
 

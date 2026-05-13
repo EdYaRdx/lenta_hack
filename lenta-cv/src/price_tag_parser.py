@@ -3,9 +3,10 @@
 from typing import Any
 
 from src.ocr import extract_text
-from src.parser import parse_ocr_results
 from src.preprocess import preprocess_one_image
 from src.schema import empty_result_row, normalize_result_row
+from src.strategy_resolver import resolve_parser
+from src.tag_type import classify_price_tag
 
 
 def parse_price_tag(
@@ -29,14 +30,10 @@ def parse_price_tag(
         backend_name=backend_name,
         use_processed=use_processed,
     )
-    parsed = parse_ocr_results(ocr_results)
-
-    if parsed.get("price") is not None:
-        row["price_card"] = parsed["price"]
-    if parsed.get("date") is not None:
-        row["print_datetime"] = parsed["date"]
-    if parsed.get("code") is not None:
-        row["id_sku"] = parsed["code"]
+    tag_info = classify_price_tag(ocr_results)
+    parser = resolve_parser(tag_info)
+    parsed_fields = parser.parse(ocr_results, tag_info)
+    row.update(parsed_fields)
 
     return normalize_result_row(row)
 
