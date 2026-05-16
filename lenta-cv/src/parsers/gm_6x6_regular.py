@@ -1,12 +1,16 @@
 """Parser for regular GM 6x6 price tags."""
 
+from pathlib import Path
 from typing import Any
 
+from src.extractors.additional_info import extract_additional_info
+from src.extractors.identifiers import extract_barcode, extract_id_sku, extract_print_datetime
 from src.extractors.prices import (
     extract_main_price_by_layout,
     extract_price_near_without_card_label,
 )
 from src.extractors.product_name import extract_product_name_top_area
+from src.extractors.visual_meta import extract_code, extract_color, extract_special_symbols
 from src.parser import parse_ocr_results
 from src.parsers.base import BasePriceTagParser
 
@@ -26,7 +30,12 @@ class Gm6x6RegularParser(BasePriceTagParser):
 
     tag_family = "gm_6x6_regular"
 
-    def parse(self, ocr_results: list[dict[str, Any]], tag_info: dict[str, Any]) -> dict[str, Any]:
+    def parse(
+        self,
+        ocr_results: list[dict[str, Any]],
+        tag_info: dict[str, Any],
+        image_path: str | Path | None = None,
+    ) -> dict[str, Any]:
         """Return fields currently supported for GM 6x6 regular tags."""
         parsed = parse_ocr_results(ocr_results)
         result: dict[str, Any] = {}
@@ -45,10 +54,37 @@ class Gm6x6RegularParser(BasePriceTagParser):
         if product_name:
             result["product_name"] = product_name
 
-        if parsed.get("date") is not None:
-            result["print_datetime"] = parsed["date"]
-        if parsed.get("code") is not None:
+        id_sku = extract_id_sku(ocr_results, tag_info)
+        if id_sku:
+            result["id_sku"] = id_sku
+        elif parsed.get("code") is not None:
             result["id_sku"] = parsed["code"]
+
+        print_datetime = extract_print_datetime(ocr_results, tag_info)
+        if print_datetime:
+            result["print_datetime"] = print_datetime
+        elif parsed.get("date") is not None:
+            result["print_datetime"] = parsed["date"]
+
+        barcode = extract_barcode(ocr_results, tag_info)
+        if barcode:
+            result["barcode"] = barcode
+
+        additional_info = extract_additional_info(ocr_results, tag_info)
+        if additional_info:
+            result["additional_info"] = additional_info
+
+        color = extract_color(image_path, tag_info)
+        if color:
+            result["color"] = color
+
+        special_symbols = extract_special_symbols(ocr_results, tag_info)
+        if special_symbols:
+            result["special_symbols"] = special_symbols
+
+        code = extract_code(ocr_results, tag_info)
+        if code:
+            result["code"] = code
 
         return result
 

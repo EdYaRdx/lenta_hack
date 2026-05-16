@@ -1,5 +1,6 @@
 """Fallback parser for unknown price tag families."""
 
+from pathlib import Path
 from typing import Any
 
 from src.parser import parse_ocr_results
@@ -11,7 +12,12 @@ class GenericParser(BasePriceTagParser):
 
     tag_family = "unknown"
 
-    def parse(self, ocr_results: list[dict[str, Any]], tag_info: dict[str, Any]) -> dict[str, Any]:
+    def parse(
+        self,
+        ocr_results: list[dict[str, Any]],
+        tag_info: dict[str, Any],
+        image_path: str | Path | None = None,
+    ) -> dict[str, Any]:
         """Return fields supported by the legacy parser."""
         parsed = parse_ocr_results(ocr_results)
         result: dict[str, Any] = {}

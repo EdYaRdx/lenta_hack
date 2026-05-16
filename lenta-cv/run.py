@@ -50,6 +50,7 @@ def resolve_raw_image(image_name: str) -> Path | None:
 def run_one_image(
     image_name: str,
     preprocess: bool = True,
+    auto_orient: bool = True,
 ) -> tuple[dict[str, Any] | None, Path | None]:
     """Parse one image, print its row, and save it to the result CSV."""
     image_path = resolve_raw_image(image_name)
@@ -59,7 +60,11 @@ def run_one_image(
 
     from src.price_tag_parser import parse_price_tag
 
-    row = parse_price_tag(image_path.name, preprocess=preprocess)
+    row = parse_price_tag(
+        image_path.name,
+        preprocess=preprocess,
+        auto_orient=auto_orient,
+    )
     print(row)
 
     output_path = save_results([row])
@@ -67,7 +72,7 @@ def run_one_image(
     return row, output_path
 
 
-def run_all_images(preprocess: bool = True) -> Path | None:
+def run_all_images(preprocess: bool = True, auto_orient: bool = True) -> Path | None:
     """Parse all raw images and save all rows to the result CSV."""
     image_paths = find_raw_images()
     if not image_paths:
@@ -77,7 +82,11 @@ def run_all_images(preprocess: bool = True) -> Path | None:
     from src.price_tag_parser import parse_price_tag
 
     rows = [
-        parse_price_tag(path.name, preprocess=preprocess)
+        parse_price_tag(
+            path.name,
+            preprocess=preprocess,
+            auto_orient=auto_orient,
+        )
         for path in image_paths
     ]
     output_path = save_results(rows)
@@ -90,13 +99,14 @@ def run_all_images(preprocess: bool = True) -> Path | None:
 def run_full_pipeline(
     image_name: str | None = None,
     preprocess: bool = True,
+    auto_orient: bool = True,
 ) -> dict[str, Any] | list[dict[str, Any]] | None:
     """Backward-compatible wrapper for parsing one image or all images."""
     if image_name is None:
-        run_all_images(preprocess=preprocess)
+        run_all_images(preprocess=preprocess, auto_orient=auto_orient)
         return None
 
-    row, _ = run_one_image(image_name, preprocess=preprocess)
+    row, _ = run_one_image(image_name, preprocess=preprocess, auto_orient=auto_orient)
     return row
 
 
@@ -121,6 +131,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Skip preprocessing and use existing processed/raw images.",
     )
+    parser.add_argument(
+        "--no-auto-orient",
+        action="store_true",
+        help="Skip OCR-based orientation selection.",
+    )
     return parser
 
 
@@ -129,12 +144,17 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_arg_parser()
     args = parser.parse_args(argv)
     should_preprocess = not args.no_preprocess
+    should_auto_orient = not args.no_auto_orient
 
     if args.all or args.image_name is None:
-        run_all_images(preprocess=should_preprocess)
+        run_all_images(preprocess=should_preprocess, auto_orient=should_auto_orient)
         return 0
 
-    row, _ = run_one_image(args.image_name, preprocess=should_preprocess)
+    row, _ = run_one_image(
+        args.image_name,
+        preprocess=should_preprocess,
+        auto_orient=should_auto_orient,
+    )
     return 0 if row is not None else 1
 
 
