@@ -4,6 +4,7 @@ import re
 from typing import Any
 
 from src.ocr import get_ocr_bbox, get_ocr_confidence, get_ocr_text
+from src.utils.barcode import is_valid_ean13, normalize_barcode
 from src.utils.bbox import bbox_bottom, bbox_center, bbox_left, bbox_top
 from src.utils.price import normalize_digits
 
@@ -162,8 +163,10 @@ def extract_barcode(ocr_results: list[dict], tag_info: dict | None = None) -> st
         block["digits"] for block in blocks
         if len(block["digits"]) == 13
     ]
-    if direct_candidates:
-        return direct_candidates[0]
+    for candidate in direct_candidates:
+        barcode = normalize_barcode(candidate)
+        if is_valid_ean13(barcode):
+            return barcode
 
     parts = [
         block for block in blocks
@@ -181,8 +184,9 @@ def extract_barcode(ocr_results: list[dict], tag_info: dict | None = None) -> st
             if position == 1 and len(digits) == 5:
                 digits = f"0{digits}"
             combined += digits
-        if len(combined) == 13:
-            return combined
+        barcode = normalize_barcode(combined)
+        if is_valid_ean13(barcode):
+            return barcode
 
     return ""
 

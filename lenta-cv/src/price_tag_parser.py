@@ -4,7 +4,6 @@ from typing import Any
 
 from src.extractors.qr import extract_qr_fields
 from src.ocr import RAW_DIR, extract_text, find_processed_image
-from src.orientation import choose_best_orientation
 from src.preprocess import preprocess_one_image
 from src.result_row_builder import build_result_row
 from src.schema import empty_result_row, normalize_result_row
@@ -17,39 +16,25 @@ def parse_price_tag(
     backend_name: str = "easyocr",
     use_processed: bool = True,
     preprocess: bool = True,
-    auto_orient: bool = True,
+    auto_orient: bool = False,
 ) -> dict[str, Any]:
     """Parse one image and return one normalized result row."""
+    # auto_orient is deprecated: input crops are expected to be already oriented.
     if preprocess:
         try:
             preprocess_one_image(image_name)
         except Exception as error:
             print(f"Preprocessing failed for {image_name}: {error}")
 
-    ocr_results = None
     image_path_for_qr = find_processed_image(image_name) if use_processed else None
     if image_path_for_qr is None:
         image_path_for_qr = RAW_DIR / image_name
 
-    if auto_orient:
-        try:
-            orientation = choose_best_orientation(str(image_path_for_qr), ocr_backend_name=backend_name)
-            image_path_for_qr = orientation["image_path"]
-            print(
-                f"Selected orientation for {image_name}: "
-                f"angle={orientation['angle']} score={orientation['score']}"
-            )
-            if orientation["angle"] != 0:
-                ocr_results = orientation["ocr_results"]
-        except Exception as error:
-            print(f"Auto-orientation failed for {image_name}: {error}")
-
-    if ocr_results is None:
-        ocr_results = extract_text(
-            image_name,
-            backend_name=backend_name,
-            use_processed=use_processed,
-        )
+    ocr_results = extract_text(
+        image_name,
+        backend_name=backend_name,
+        use_processed=use_processed,
+    )
 
     tag_info = classify_price_tag(ocr_results)
     parser = resolve_parser(tag_info)
@@ -72,7 +57,7 @@ def parse_many_price_tags(
     backend_name: str = "easyocr",
     use_processed: bool = True,
     preprocess: bool = True,
-    auto_orient: bool = True,
+    auto_orient: bool = False,
 ) -> list[dict[str, Any]]:
     """Parse multiple images and keep a blank row for failed items."""
     rows = []

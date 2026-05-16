@@ -8,6 +8,8 @@ from urllib.parse import parse_qsl, unquote_plus, urlparse
 import cv2
 import numpy as np
 
+from src.utils.barcode import is_valid_ean13, normalize_barcode
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 QR_DEBUG_DIR = PROJECT_ROOT / "outputs" / "qr_debug"
@@ -53,6 +55,17 @@ QR_KEY_MAP = {
 }
 
 _LAST_DEBUG: dict[str, Any] = {}
+_LAST_PARSED_DEBUG: dict[str, Any] = {}
+
+QR_PRICE_FIELDS = {
+    "price1_qr",
+    "price2_qr",
+    "price3_qr",
+    "price4_qr",
+    "wholesale_level_1_price",
+    "wholesale_level_2_price",
+    "action_price_qr",
+}
 
 
 def _resolve_path(image_path: str | Path) -> Path:
@@ -249,6 +262,9 @@ def _write_debug_report(
     best_roi: str,
     best_variant: str,
     attempts: list[str],
+    parsed_fields: dict | None = None,
+    unknown_fields: dict | None = None,
+    invalid_fields: dict | None = None,
 ) -> None:
     QR_DEBUG_DIR.mkdir(parents=True, exist_ok=True)
     debug_path = QR_DEBUG_DIR / f"{image_path.stem}_qr_debug.txt"
@@ -257,8 +273,19 @@ def _write_debug_report(
         f"decoded: {'yes' if decoded else 'no'}",
         f"best_roi: {best_roi}",
         f"best_variant: {best_variant}",
-        f"payload: {payload}",
+        "raw payload:",
+        payload,
     ]
+    if decoded:
+        lines.append("parsed fields:")
+        for key, value in (parsed_fields or {}).items():
+            lines.append(f"{key}={value}")
+        lines.append("unknown fields:")
+        for key, value in (unknown_fields or {}).items():
+            lines.append(f"{key}={value}")
+        lines.append("invalid fields:")
+        for key, value in (invalid_fields or {}).items():
+            lines.append(f"{key}={value}")
     if not decoded:
         lines.append("attempts:")
         lines.extend(f"- {attempt}" for attempt in attempts)
@@ -329,6 +356,15 @@ def _normalize_key(key: str) -> str:
     return key.strip().lower()
 
 
+def normalize_qr_price(value: str) -> str:
+    """Normalize QR price values by removing grouping spaces."""
+    stripped = str(value or "").strip().replace(",", ".")
+    candidate = stripped.replace(" ", "")
+    if candidate.count(".") <= 1 and all(char.isdigit() or char == "." for char in candidate):
+        return candidate
+    return stripped
+
+
 def _normalize_qr_value(value: Any) -> str:
     normalized = str(value).strip()
     normalized = unquote_plus(normalized)
@@ -369,12 +405,46 @@ def _payload_pairs(payload: str) -> list[tuple[str, Any]]:
 def parse_qr_payload(payload: str) -> dict:
     """Parse QR payload into output CSV field names."""
     parsed: dict[str, str] = {}
+    unknown_fields: dict[str, str] = {}
+    invalid_fields: dict[str, str] = {}
+
     for key, value in _payload_pairs(payload):
-        output_field = QR_KEY_MAP.get(_normalize_key(key))
+        normalized_key = _normalize_key(key)
+        output_field = QR_KEY_MAP.get(normalized_key)
+        normalized_value = _normalize_qr_value(value)
         if output_field is None:
+            unknown_fields[str(key)] = normalized_value
             continue
-        parsed[output_field] = _normalize_qr_value(value)
+
+        if output_field == "qr_code_barcode":
+            barcode = normalize_barcode(normalized_value)
+            if is_valid_ean13(barcode):
+                parsed[output_field] = barcode
+            else:
+                invalid_fields[str(key)] = normalized_value
+            continue
+
+        if output_field in QR_PRICE_FIELDS:
+            parsed[output_field] = normalize_qr_price(normalized_value)
+        else:
+            parsed[output_field] = normalized_value
+
+    global _LAST_PARSED_DEBUG
+    _LAST_PARSED_DEBUG = {
+        "parsed_fields": parsed,
+        "unknown_fields": unknown_fields,
+        "invalid_fields": invalid_fields,
+    }
     return parsed
+
+
+def extract_unknown_qr_fields(payload: str) -> dict:
+    """Return QR payload fields that are not mapped to output columns."""
+    unknown_fields: dict[str, str] = {}
+    for key, value in _payload_pairs(payload):
+        if QR_KEY_MAP.get(_normalize_key(key)) is None:
+            unknown_fields[str(key)] = _normalize_qr_value(value)
+    return unknown_fields
 
 
 def extract_qr_fields(image_path: str | Path) -> dict:
@@ -384,11 +454,27 @@ def extract_qr_fields(image_path: str | Path) -> dict:
         return {}
 
     parsed = parse_qr_payload(payload)
+    debug_info = _LAST_PARSED_DEBUG
 
     result = {}
     for field in QR_OUTPUT_FIELDS:
         value = parsed.get(field, "")
         result[field] = value if value else ABSENT_VALUE
+    if "qr_code_barcode" not in parsed and debug_info.get("invalid_fields"):
+        result["qr_code_barcode"] = ""
+
+    resolved_path = _resolve_path(image_path)
+    _write_debug_report(
+        resolved_path,
+        True,
+        payload,
+        _LAST_DEBUG.get("best_roi", ""),
+        _LAST_DEBUG.get("best_variant", ""),
+        _LAST_DEBUG.get("attempts", []),
+        parsed_fields=result,
+        unknown_fields=debug_info.get("unknown_fields", {}),
+        invalid_fields=debug_info.get("invalid_fields", {}),
+    )
     return result
 
 
