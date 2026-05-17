@@ -1,9 +1,13 @@
 from pathlib import Path
 from functools import lru_cache
+import re
 from typing import Any, Optional, Protocol
 
 import cv2
 import easyocr
+
+from src.ocr_preprocess_profiles import build_ocr_variants_for_profile
+from src.utils.price import normalize_digits
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -92,6 +96,13 @@ class EasyOCRBackend:
 
     def read(self, image_path: Path):
         raw_results = self.reader.readtext(str(image_path))
+        return [
+            make_ocr_item(text, confidence, bbox=bbox, source="easyocr")
+            for bbox, text, confidence in raw_results
+        ]
+
+    def read_image(self, image):
+        raw_results = self.reader.readtext(image)
         return [
             make_ocr_item(text, confidence, bbox=bbox, source="easyocr")
             for bbox, text, confidence in raw_results
@@ -189,7 +200,86 @@ def print_ocr_results(results, image_name: str):
         print(text, confidence)
 
 
-def extract_text(image_name: str, backend_name: str = "easyocr", use_processed: bool = True):
+def score_ocr_blocks_for_price_tag(ocr_results: list[dict]) -> float:
+    """Score OCR blocks for selecting an image variant."""
+    visible_items = [
+        item for item in ocr_results
+        if not get_ocr_text(item).startswith("__")
+    ]
+    if not visible_items:
+        return 0.0
+
+    score = 0.0
+    text_blob = "\n".join(get_ocr_text(item).lower() for item in visible_items)
+    avg_confidence = sum(get_ocr_confidence(item) for item in visible_items) / len(visible_items)
+    score += min(len(visible_items), 30) * 0.8
+    score += avg_confidence * 8.0
+
+    for keyword in ("с карт", "картой", "без карт", "карты", "руб", "сух", "вино"):
+        if keyword in text_blob:
+            score += 4.0
+
+    if re.search(r"-?\s*\d{1,2}\s*%", text_blob):
+        score += 8.0
+    elif "%" in text_blob:
+        score += 4.0
+
+    price_like_count = 0
+    digit_group_count = 0
+    for item in visible_items:
+        digits = normalize_digits(get_ocr_text(item))
+        if not digits:
+            continue
+        digit_group_count += 1
+        if len(digits) in {2, 3, 4}:
+            price_like_count += 1
+        if len(digits) == 13:
+            score += 8.0
+
+    score += min(price_like_count, 10) * 2.0
+    score += min(digit_group_count, 15) * 0.8
+
+    noise_count = sum(
+        1 for item in visible_items
+        if re.fullmatch(r"[\W_#@><=~]+", get_ocr_text(item).strip())
+    )
+    score -= noise_count * 1.2
+    if digit_group_count == 0:
+        score -= 8.0
+    if len(visible_items) < 4:
+        score -= 5.0
+
+    return round(score, 4)
+
+
+def _read_profile_variants(image_path: Path, backend: OCRBackend, profile: str) -> tuple[list[dict], str]:
+    image = cv2.imread(str(image_path))
+    if image is None:
+        raise FileNotFoundError(f"Could not read image: {image_path}")
+
+    if not isinstance(backend, EasyOCRBackend):
+        return backend.read(image_path), "raw"
+
+    candidates = []
+    for variant in build_ocr_variants_for_profile(image, profile):
+        results = backend.read_image(variant["image"])
+        candidates.append((score_ocr_blocks_for_price_tag(results), variant["name"], results))
+
+    if not candidates:
+        return [], ""
+
+    score, name, results = sorted(candidates, key=lambda item: item[0], reverse=True)[0]
+    print(f"Using OCR profile {profile}: {name} score={score}")
+    return results, name
+
+
+def extract_text(
+    image_name: str,
+    backend_name: str = "easyocr",
+    use_processed: bool = True,
+    ocr_profile: str = "default",
+    raw_image_path: str | Path | None = None,
+):
     """
     Extract text from image using OCR.
     
@@ -201,22 +291,32 @@ def extract_text(image_name: str, backend_name: str = "easyocr", use_processed: 
     Returns:
         List of OCR result dictionaries with text, confidence, bbox, and source.
     """
-    # Try to use preprocessed image if requested
-    if use_processed:
+    explicit_path = Path(raw_image_path) if raw_image_path is not None else None
+
+    if ocr_profile != "default":
+        image_path = explicit_path or RAW_DIR / image_name
+    elif explicit_path is not None and not use_processed:
+        image_path = explicit_path
+    elif use_processed:
         processed_path = find_processed_image(image_name)
         if processed_path:
             print(f"Using preprocessed image: {processed_path.name}")
             image_path = processed_path
         else:
             print(f"Preprocessed image not found, using raw: {image_name}")
-            image_path = RAW_DIR / image_name
+            image_path = explicit_path or RAW_DIR / image_name
     else:
-        image_path = RAW_DIR / image_name
+        image_path = explicit_path or RAW_DIR / image_name
     
     backend = get_backend(backend_name)
-    results = ocr_one_image(image_path, backend=backend)
-    if use_processed and isinstance(backend, EasyOCRBackend):
-        results.extend(extract_price_hints(RAW_DIR / image_name, backend))
+    if ocr_profile == "default":
+        results = ocr_one_image(image_path, backend=backend)
+    else:
+        results, _variant_name = _read_profile_variants(image_path, backend, ocr_profile)
+
+    raw_path_for_hints = explicit_path or RAW_DIR / image_name
+    if use_processed and ocr_profile == "default" and isinstance(backend, EasyOCRBackend):
+        results.extend(extract_price_hints(raw_path_for_hints, backend))
     print_ocr_results(results, image_path.name)
     return results
 

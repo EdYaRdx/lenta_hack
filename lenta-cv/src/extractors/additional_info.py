@@ -123,7 +123,7 @@ def extract_additional_info(ocr_results: list[dict], tag_info: dict | None = Non
         if scale_number:
             return f"номер на весах {scale_number}"
 
-    return "номер на весах"
+    return ""
 
 
 if __name__ == "__main__":

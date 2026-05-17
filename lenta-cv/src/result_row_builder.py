@@ -17,6 +17,15 @@ ABSENT_FIELDS_BY_FAMILY: dict[str, set[str]] = {
         "action_price_qr",
         "action_code_qr",
     },
+    "gm_6x6_red_promo": {
+        "price_discount",
+        "wholesale_level_1_count",
+        "wholesale_level_1_price",
+        "wholesale_level_2_count",
+        "wholesale_level_2_price",
+        "action_price_qr",
+        "action_code_qr",
+    },
 }
 
 

@@ -1,6 +1,7 @@
 """Check recognized CSV results against expected clean price-tag baselines."""
 
 import csv
+import argparse
 import re
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -196,4 +197,16 @@ def check_results(
 
 
 if __name__ == "__main__":
-    check_results()
+    parser = argparse.ArgumentParser(description="Check result CSV against an expected CSV baseline.")
+    parser.add_argument(
+        "--expected",
+        default="data/expected/gm_6x6_regular_expected.csv",
+        help="Expected CSV path.",
+    )
+    parser.add_argument(
+        "--actual",
+        default="outputs/result.csv",
+        help="Actual result CSV path.",
+    )
+    args = parser.parse_args()
+    check_results(expected_path=args.expected, actual_path=args.actual)

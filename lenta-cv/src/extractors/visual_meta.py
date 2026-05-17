@@ -68,10 +68,10 @@ def _ocr_blocks(ocr_results: list[dict]) -> list[dict[str, Any]]:
 
 
 def extract_special_symbols(ocr_results: list[dict], tag_info: dict | None = None) -> str:
-    """Return small service symbols such as K/L/Sh, or absent for regular tags."""
+    """Return small service symbols such as K/L/Sh when confidently visible."""
     blocks = _ocr_blocks(ocr_results)
     if not blocks:
-        return "нет" if _tag_family(tag_info) == "gm_6x6_regular" else ""
+        return ""
 
     min_y = min(bbox_top(block["bbox"]) for block in blocks)
     max_y = max(bbox_bottom(block["bbox"]) for block in blocks)
@@ -95,8 +95,6 @@ def extract_special_symbols(ocr_results: list[dict], tag_info: dict | None = Non
 
     if symbols:
         return " ".join(symbols)
-    if _tag_family(tag_info) == "gm_6x6_regular":
-        return "нет"
 
     return ""
 

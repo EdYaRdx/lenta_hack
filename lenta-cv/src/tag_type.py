@@ -76,7 +76,7 @@ def detect_has_default_price(text: str) -> bool:
     ])
 
 
-def classify_price_tag(ocr_results: list[dict[str, Any]]) -> dict[str, Any]:
+def classify_price_tag(ocr_results: list[dict[str, Any]], visual_color: str | None = None) -> dict[str, Any]:
     """Build TagInfo from OCR results and return it as a dict."""
     text = get_all_text(ocr_results)
 
@@ -94,6 +94,10 @@ def classify_price_tag(ocr_results: list[dict[str, Any]]) -> dict[str, Any]:
         for item in ocr_results
     )
     has_qr = has_any(text, [r"\bqr\b", r"qr-код", r"кью\s*ар"])
+    price_like_count = sum(
+        1 for item in ocr_results
+        if 2 <= len(normalize_digits(get_ocr_text(item))) <= 4
+    )
 
     tag_format = "unknown"
     if has_card_price and has_default_price:
@@ -102,7 +106,17 @@ def classify_price_tag(ocr_results: list[dict[str, Any]]) -> dict[str, Any]:
     mechanic = detect_mechanic(text)
     family = "unknown"
     confidence = 0.0
-    if tag_format == "gm_6x6" and mechanic == "regular":
+    if visual_color == "red" and (has_discount or price_like_count >= 2):
+        tag_format = "gm_6x6"
+        mechanic = "promo"
+        family = "gm_6x6_red_promo"
+        confidence = 0.55
+        if has_discount:
+            confidence = 0.7
+        has_card_price = True
+        has_default_price = True
+        has_discount = True
+    elif tag_format == "gm_6x6" and mechanic == "regular":
         family = "gm_6x6_regular"
         confidence = 0.7
         if has_scale_number or has_barcode or has_qr:
