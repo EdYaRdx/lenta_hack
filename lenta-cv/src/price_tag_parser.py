@@ -20,6 +20,7 @@ def parse_price_tag(
     preprocess: bool = True,
     auto_orient: bool = False,
     raw_image_path: str | Path | None = None,
+    use_ocr_cache: bool = False,
 ) -> dict[str, Any]:
     """Parse one image and return one normalized result row."""
     # auto_orient is deprecated: input crops are expected to be already oriented.
@@ -44,6 +45,7 @@ def parse_price_tag(
         use_processed=use_processed and ocr_profile == "default",
         ocr_profile=ocr_profile,
         raw_image_path=raw_path,
+        use_cache=use_ocr_cache,
     )
 
     tag_info = classify_price_tag(ocr_results, visual_color=detected_color)
@@ -75,6 +77,7 @@ def parse_many_price_tags(
     preprocess: bool = True,
     auto_orient: bool = False,
     raw_image_paths: list[str | Path] | None = None,
+    use_ocr_cache: bool = False,
 ) -> list[dict[str, Any]]:
     """Parse multiple images and keep a blank row for failed items."""
     rows = []
@@ -90,6 +93,7 @@ def parse_many_price_tags(
                     preprocess=preprocess,
                     auto_orient=auto_orient,
                     raw_image_path=raw_image_path,
+                    use_ocr_cache=use_ocr_cache,
                 )
             )
         except Exception as error:

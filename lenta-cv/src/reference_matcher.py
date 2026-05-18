@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from difflib import SequenceMatcher
+import re
 from typing import Any
 
 from src.reference_store import ReferenceItem, parse_price_value
 from src.schema import ABSENT_VALUE, OUTPUT_COLUMNS, normalize_result_row
-from src.text_normalization import normalize_product_tokens
+from src.text_normalization import normalize_product_tokens, normalize_text
 from src.utils.barcode import normalize_barcode
 
 
@@ -79,6 +81,7 @@ class ReferenceMatch:
     reasons: list[str]
     warnings: list[str]
     top_candidates: list[dict[str, Any]]
+    used_catalog_product_name: bool = False
 
 
 def _present(value: Any) -> bool:
@@ -93,7 +96,28 @@ def _price_close(left: float | None, right: float | None, tolerance: float) -> b
     return left is not None and right is not None and abs(left - right) <= tolerance
 
 
-def _score_reference(row: dict, item: ReferenceItem) -> tuple[float, list[str], list[str]]:
+def _normalize_product_name(value: Any) -> str:
+    text = normalize_text(str(value or ""))
+    text = re.sub(r"\b0\s*[,.]?\s*75\s*l\b", "0.75l", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+
+def _product_name_similarity(left: Any, right: Any) -> float:
+    left_text = _normalize_product_name(left)
+    right_text = _normalize_product_name(right)
+    if not left_text or not right_text:
+        return 0.0
+    if left_text == right_text:
+        return 1.0
+    return SequenceMatcher(None, left_text, right_text).ratio()
+
+
+def _score_reference(
+    row: dict,
+    item: ReferenceItem,
+    used_catalog_product_name: bool,
+) -> tuple[float, list[str], list[str]]:
     score = 0.0
     reasons: list[str] = []
     warnings: list[str] = []
@@ -106,6 +130,7 @@ def _score_reference(row: dict, item: ReferenceItem) -> tuple[float, list[str], 
         if row_barcode == item.barcode:
             score += 60
             reasons.append("barcode exact match +60")
+            reasons.append("barcode_exact_match")
         else:
             score -= 40
             warnings.append("barcode conflict -40")
@@ -114,6 +139,7 @@ def _score_reference(row: dict, item: ReferenceItem) -> tuple[float, list[str], 
         if row_qr_barcode in {item.qr_code_barcode, item.barcode}:
             score += 55
             reasons.append("qr barcode exact match +55")
+            reasons.append("qr_code_barcode_exact_match")
         else:
             score -= 35
             warnings.append("qr barcode conflict -35")
@@ -122,38 +148,60 @@ def _score_reference(row: dict, item: ReferenceItem) -> tuple[float, list[str], 
         if row_id_sku == item.id_sku:
             score += 50
             reasons.append("id_sku exact match +50")
+            reasons.append("id_sku_exact_match")
 
     row_price_card = parse_price_value(row.get("price_card"))
     row_price_default = parse_price_value(row.get("price_default"))
-    if _price_close(row_price_card, item.price_card, 0.01):
+    row_discount = str(row.get("discount_amount", "") or "").strip()
+    name_similarity = _product_name_similarity(row.get("product_name"), item.product_name)
+    name_exact = name_similarity >= 0.999
+    name_near = name_similarity >= 0.95
+
+    if name_exact:
+        score += 60
+        reasons.append("product_name exact +60")
+        if used_catalog_product_name:
+            reasons.append("catalog_clean_name_exact_match")
+    elif name_near:
+        score += 50
+        reasons.append("product_name near exact (>=0.95) +50")
+    price_card_exact = _price_close(row_price_card, item.price_card, 0.01)
+    if price_card_exact:
         score += 30
         reasons.append("price_card exact +30")
+        reasons.append("price_card_exact_match")
     elif row_price_card is not None and item.price_card is not None and abs(row_price_card - item.price_card) > 20:
         score -= 20
         warnings.append("price_card differs strongly -20")
 
-    if _price_close(row_price_default, item.price_default, 0.01):
+    price_default_exact = _price_close(row_price_default, item.price_default, 0.01)
+    price_default_close_1 = _price_close(row_price_default, item.price_default, 1.00)
+    if price_default_exact:
         score += 20
         reasons.append("price_default exact +20")
-    elif _price_close(row_price_default, item.price_default, 1.00):
+    elif price_default_close_1:
         score += 12
         reasons.append("price_default close within 1.00 +12")
     elif _price_close(row_price_default, item.price_default, 5.00):
         score += 6
         reasons.append("price_default close within 5.00 +6")
 
-    row_discount = str(row.get("discount_amount", "") or "").strip()
+    discount_exact = False
     if row_discount and item.discount_amount:
         if _same_text(row_discount, item.discount_amount):
             score += 20
             reasons.append("discount_amount exact +20")
+            reasons.append("discount_exact_match")
+            discount_exact = True
         else:
             score -= 15
             warnings.append("discount_amount conflict -15")
 
+    color_exact = False
     if _present(row.get("color")) and item.color and _same_text(row.get("color"), item.color):
         score += 8
         reasons.append("color exact +8")
+        color_exact = True
 
     if _present(row.get("price_discount")) and item.price_discount and _same_text(row.get("price_discount"), item.price_discount):
         score += 5
@@ -182,6 +230,17 @@ def _score_reference(row: dict, item: ReferenceItem) -> tuple[float, list[str], 
             score += bonus
             reasons.append(f"{field} exact +{bonus}")
 
+    name_match = name_exact or name_near
+    if name_match and price_card_exact:
+        score += 15
+        reasons.append("product_name+price_card exact bonus +15")
+    if name_match and discount_exact:
+        score += 10
+        reasons.append("product_name+discount exact bonus +10")
+    if name_match and price_default_close_1:
+        score += 10
+        reasons.append("product_name+price_default close bonus +10")
+
     return score, reasons, warnings
 
 
@@ -197,14 +256,18 @@ def _candidate_dict(item: ReferenceItem, score: float, reasons: list[str]) -> di
     }
 
 
-def match_reference_row(row: dict, reference_items: list[ReferenceItem]) -> ReferenceMatch:
+def match_reference_row(
+    row: dict,
+    reference_items: list[ReferenceItem],
+    used_catalog_product_name: bool = False,
+) -> ReferenceMatch:
     """Find the best reference item for an aggregated result row."""
     if not reference_items:
-        return ReferenceMatch(False, "none", 0.0, 0.0, 0.0, None, [], ["no reference items loaded"], [])
+        return ReferenceMatch(False, "none", 0.0, 0.0, 0.0, None, [], ["no reference items loaded"], [], False)
 
     scored = []
     for item in reference_items:
-        score, reasons, warnings = _score_reference(row, item)
+        score, reasons, warnings = _score_reference(row, item, used_catalog_product_name)
         scored.append((score, item, reasons, warnings))
 
     scored.sort(key=lambda item: item[0], reverse=True)
@@ -221,7 +284,35 @@ def match_reference_row(row: dict, reference_items: list[ReferenceItem]) -> Refe
         or bool(row_id_sku and row_id_sku == best_item.id_sku)
     )
 
-    if has_exact_id or (best_score >= 70 and margin >= 15):
+    name_similarity = _product_name_similarity(row.get("product_name"), best_item.product_name)
+    name_match = name_similarity >= 0.95
+    row_price_card = parse_price_value(row.get("price_card"))
+    row_price_default = parse_price_value(row.get("price_default"))
+    row_discount = str(row.get("discount_amount", "") or "").strip()
+    price_card_exact = _price_close(row_price_card, best_item.price_card, 0.01)
+    price_default_exact = _price_close(row_price_default, best_item.price_default, 0.01)
+    price_default_close_1 = _price_close(row_price_default, best_item.price_default, 1.00)
+    discount_exact = bool(row_discount and best_item.discount_amount and _same_text(row_discount, best_item.discount_amount))
+    color_exact = bool(_present(row.get("color")) and best_item.color and _same_text(row.get("color"), best_item.color))
+
+    catalog_assisted_high = (
+        used_catalog_product_name and name_match and price_card_exact and discount_exact and color_exact
+    )
+    meets_minimum = (name_match and price_card_exact) or (name_match and price_default_close_1 and discount_exact)
+    strong_price_high = price_card_exact and price_default_exact and discount_exact and color_exact
+
+    if has_exact_id and margin >= 5:
+        confidence = "high"
+    elif has_exact_id:
+        confidence = "medium"
+        warnings.append("reference conflict on exact id match; margin too small")
+    elif catalog_assisted_high:
+        confidence = "high"
+        reasons.append("reference_high_by_catalog_assisted_match")
+    elif strong_price_high and margin >= 10:
+        confidence = "high"
+        reasons.append("reference_high_by_strong_price_discount_color")
+    elif best_score >= 70 and margin >= 15 and (name_match or has_exact_id) and meets_minimum:
         confidence = "high"
     elif best_score >= 50 and margin >= 10:
         confidence = "medium"
@@ -245,6 +336,7 @@ def match_reference_row(row: dict, reference_items: list[ReferenceItem]) -> Refe
         reasons=reasons,
         warnings=warnings,
         top_candidates=top_candidates,
+        used_catalog_product_name=used_catalog_product_name,
     )
 
 
@@ -411,4 +503,5 @@ def reference_match_to_dict(match: ReferenceMatch) -> dict[str, Any]:
         "reasons": match.reasons,
         "warnings": match.warnings,
         "top_candidates": match.top_candidates,
+        "used_catalog_product_name": match.used_catalog_product_name,
     }

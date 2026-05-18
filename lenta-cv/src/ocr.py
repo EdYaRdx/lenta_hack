@@ -6,6 +6,7 @@ from typing import Any, Optional, Protocol
 import cv2
 import easyocr
 
+from src.ocr_cache import load_cached_ocr, save_cached_ocr
 from src.ocr_preprocess_profiles import build_ocr_variants_for_profile
 from src.utils.price import normalize_digits
 
@@ -279,6 +280,7 @@ def extract_text(
     use_processed: bool = True,
     ocr_profile: str = "default",
     raw_image_path: str | Path | None = None,
+    use_cache: bool = False,
 ):
     """
     Extract text from image using OCR.
@@ -308,6 +310,13 @@ def extract_text(
     else:
         image_path = explicit_path or RAW_DIR / image_name
     
+    if use_cache:
+        cached = load_cached_ocr(image_path, ocr_profile)
+        if cached is not None:
+            print(f"Using cached OCR: {image_path.name} profile={ocr_profile}")
+            print_ocr_results(cached, image_path.name)
+            return cached
+
     backend = get_backend(backend_name)
     if ocr_profile == "default":
         results = ocr_one_image(image_path, backend=backend)
@@ -317,6 +326,8 @@ def extract_text(
     raw_path_for_hints = explicit_path or RAW_DIR / image_name
     if use_processed and ocr_profile == "default" and isinstance(backend, EasyOCRBackend):
         results.extend(extract_price_hints(raw_path_for_hints, backend))
+    if use_cache:
+        save_cached_ocr(image_path, ocr_profile, results)
     print_ocr_results(results, image_path.name)
     return results
 

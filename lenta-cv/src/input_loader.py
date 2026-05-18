@@ -58,6 +58,17 @@ def _extract_bbox(metadata: dict[str, Any]) -> tuple[Any, Any, Any, Any]:
     if isinstance(bbox, list | tuple) and len(bbox) >= 4:
         return bbox[0], bbox[1], bbox[2], bbox[3]
 
+    bbox_xyxy = metadata.get("bbox_xyxy")
+    if isinstance(bbox_xyxy, dict):
+        return (
+            bbox_xyxy.get("x_min", bbox_xyxy.get("x1")),
+            bbox_xyxy.get("y_min", bbox_xyxy.get("y1")),
+            bbox_xyxy.get("x_max", bbox_xyxy.get("x2")),
+            bbox_xyxy.get("y_max", bbox_xyxy.get("y2")),
+        )
+    if isinstance(bbox_xyxy, list | tuple) and len(bbox_xyxy) >= 4:
+        return bbox_xyxy[0], bbox_xyxy[1], bbox_xyxy[2], bbox_xyxy[3]
+
     return (
         metadata.get("x_min"),
         metadata.get("y_min"),
@@ -66,16 +77,89 @@ def _extract_bbox(metadata: dict[str, Any]) -> tuple[Any, Any, Any, Any]:
     )
 
 
+def _first_metadata_value(metadata: dict[str, Any], keys: tuple[str, ...]) -> Any:
+    for key in keys:
+        if key in metadata and metadata.get(key) is not None:
+            return metadata.get(key)
+    return None
+
+
+def _to_float(value: Any) -> float | None:
+    if value in ("", None):
+        return None
+    try:
+        return float(str(value).replace(",", "."))
+    except (TypeError, ValueError):
+        return None
+
+
+def _nested_number(metadata: dict[str, Any], parent_key: str, keys: tuple[str, ...]) -> float | None:
+    parent = metadata.get(parent_key)
+    if not isinstance(parent, dict):
+        return None
+    for key in keys:
+        value = _to_float(parent.get(key))
+        if value is not None:
+            return value
+    return None
+
+
+def _first_number(*values: float | None) -> float | None:
+    for value in values:
+        if value is not None:
+            return value
+    return None
+
+
 def build_image_view(image_path: Path, metadata_path: Path | None) -> ImageView:
     """Build an ImageView from image path and optional metadata."""
     metadata = read_view_metadata(metadata_path)
     x_min, y_min, x_max, y_max = _extract_bbox(metadata)
+    x_min_float = _to_float(x_min)
+    y_min_float = _to_float(y_min)
+    x_max_float = _to_float(x_max)
+    y_max_float = _to_float(y_max)
 
-    frame_timestamp = (
-        metadata.get("frame_timestamp")
-        or metadata.get("timestamp")
-        or metadata.get("time_ms")
+    frame_timestamp = _first_metadata_value(
+        metadata,
+        ("frame_timestamp", "timestamp", "time_ms", "time_seconds", "frame_index"),
     )
+    confidence = _to_float(_first_metadata_value(
+        metadata,
+        ("confidence", "detector_confidence", "score"),
+    ))
+    sharpness = _to_float(_first_metadata_value(
+        metadata,
+        ("sharpness", "blur_score"),
+    ))
+    bbox_width = _first_number(
+        _nested_number(metadata, "bbox_size", ("width", "w")),
+        _to_float(metadata.get("bbox_width")),
+    )
+    bbox_height = _first_number(
+        _nested_number(metadata, "bbox_size", ("height", "h")),
+        _to_float(metadata.get("bbox_height")),
+    )
+    if bbox_width is None and None not in (x_min_float, x_max_float):
+        bbox_width = max(0.0, x_max_float - x_min_float)
+    if bbox_height is None and None not in (y_min_float, y_max_float):
+        bbox_height = max(0.0, y_max_float - y_min_float)
+
+    center_x = _first_number(
+        _nested_number(metadata, "center", ("x", "center_x")),
+        _nested_number(metadata, "normalized_center", ("x", "center_x")),
+        _to_float(metadata.get("center_x")),
+    )
+    center_y = _first_number(
+        _nested_number(metadata, "center", ("y", "center_y")),
+        _nested_number(metadata, "normalized_center", ("y", "center_y")),
+        _to_float(metadata.get("center_y")),
+    )
+    if center_x is None and None not in (x_min_float, x_max_float):
+        center_x = (x_min_float + x_max_float) / 2.0
+    if center_y is None and None not in (y_min_float, y_max_float):
+        center_y = (y_min_float + y_max_float) / 2.0
+
     product_id_above_tag = (
         metadata.get("product_id_above_tag")
         or metadata.get("product_id")
@@ -99,6 +183,12 @@ def build_image_view(image_path: Path, metadata_path: Path | None) -> ImageView:
         y_max=y_max,
         product_id_above_tag=str(product_id_above_tag) if product_id_above_tag else "",
         video_filename=str(video_filename) if video_filename else "",
+        confidence=confidence,
+        sharpness=sharpness,
+        bbox_width=bbox_width,
+        bbox_height=bbox_height,
+        center_x=center_x,
+        center_y=center_y,
     )
 
 

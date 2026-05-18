@@ -5,3 +5,6 @@ __pycache__/
 .env
 .vscode/
 outputs/
+/lenta-cv/outputs/product_catalog_cache/
+*.jpg
+lenta-cv/input/

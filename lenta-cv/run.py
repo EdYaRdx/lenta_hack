@@ -18,6 +18,7 @@ IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.exporter import save_results
+from src.output_normalizer import normalize_output_row, normalize_output_rows
 
 
 def resolve_project_path(path: str | Path) -> Path:
@@ -77,6 +78,7 @@ def run_one_image(
         preprocess=preprocess and not use_external_path,
         raw_image_path=image_path if use_external_path else None,
     )
+    row = normalize_output_row(row)
     print(row)
 
     saved_path = save_results([row], output_path=output_path)
@@ -105,6 +107,7 @@ def run_all_images(
         )
         for path in image_paths
     ]
+    rows = normalize_output_rows(rows)
     output_path = save_results(rows, output_path=output_path)
 
     print(f"Saved CSV: {output_path}")
@@ -183,6 +186,106 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Enable reference matching/enrichment for grouped input.",
     )
+    parser.add_argument(
+        "--product-catalog",
+        default=None,
+        help="Product catalog CSV path (db_hack.csv) for grouped product-name matching.",
+    )
+    parser.add_argument(
+        "--use-product-catalog",
+        action="store_true",
+        help="Enable product catalog matching for grouped input.",
+    )
+    parser.add_argument(
+        "--use-product-catalog-cache",
+        dest="use_product_catalog_cache",
+        action="store_true",
+        default=True,
+        help="Use persistent ProductCatalogIndex cache in grouped mode.",
+    )
+    parser.add_argument(
+        "--no-product-catalog-cache",
+        dest="use_product_catalog_cache",
+        action="store_false",
+        help="Disable persistent ProductCatalogIndex cache.",
+    )
+    parser.add_argument(
+        "--rebuild-product-catalog-cache",
+        action="store_true",
+        help="Rebuild ProductCatalogIndex cache before grouped product catalog matching.",
+    )
+    parser.add_argument(
+        "--use-view-selection",
+        dest="use_view_selection",
+        action="store_true",
+        default=True,
+        help="Process only selected promising views in grouped mode.",
+    )
+    parser.add_argument(
+        "--no-view-selection",
+        dest="use_view_selection",
+        action="store_false",
+        help="Process every view in grouped mode.",
+    )
+    parser.add_argument(
+        "--initial-views",
+        type=int,
+        default=7,
+        help="Initial number of selected views per group.",
+    )
+    parser.add_argument(
+        "--next-views",
+        type=int,
+        default=5,
+        help="Additional views to process per adaptive batch.",
+    )
+    parser.add_argument(
+        "--max-views-per-group",
+        type=int,
+        default=None,
+        help="Maximum views to OCR per group.",
+    )
+    parser.add_argument(
+        "--adaptive",
+        dest="adaptive",
+        action="store_true",
+        default=True,
+        help="Adaptively process more grouped views when reference match is not confident.",
+    )
+    parser.add_argument(
+        "--no-adaptive",
+        dest="adaptive",
+        action="store_false",
+        help="Disable adaptive grouped processing.",
+    )
+    parser.add_argument(
+        "--early-stop",
+        dest="early_stop",
+        action="store_true",
+        default=True,
+        help="Stop grouped OCR early after a high-confidence reference match.",
+    )
+    parser.add_argument(
+        "--no-early-stop",
+        dest="early_stop",
+        action="store_false",
+        help="Disable grouped early stop.",
+    )
+    parser.add_argument(
+        "--use-ocr-cache",
+        action="store_true",
+        help="Cache OCR results under outputs/ocr_cache for repeated runs.",
+    )
+    parser.add_argument(
+        "--summary-report",
+        action="store_true",
+        help="Build pipeline summary reports after grouped processing.",
+    )
+    parser.add_argument(
+        "--clear-ocr-cache",
+        action="store_true",
+        help="Clear outputs/ocr_cache and exit.",
+    )
     return parser
 
 
@@ -192,11 +295,20 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     should_preprocess = not args.no_preprocess
 
+    if args.clear_ocr_cache:
+        from src.ocr_cache import clear_ocr_cache
+
+        clear_ocr_cache()
+        print("Cleared OCR cache: outputs/ocr_cache")
+        return 0
+
     if args.grouped:
         if not args.input_root:
             parser.error("--grouped requires --input-root")
         if args.use_reference and not args.reference:
             parser.error("--use-reference requires --reference")
+        if args.use_product_catalog and not args.product_catalog:
+            parser.error("--use-product-catalog requires --product-catalog")
         from src.group_pipeline import parse_grouped_input
 
         parse_grouped_input(
@@ -204,7 +316,25 @@ def main(argv: list[str] | None = None) -> int:
             output_path=args.output,
             reference_path=args.reference,
             enable_reference_matching=args.use_reference,
+            product_catalog_path=args.product_catalog,
+            use_product_catalog=args.use_product_catalog,
+            use_view_selection=args.use_view_selection,
+            initial_views=args.initial_views,
+            next_views=args.next_views,
+            max_views_per_group=args.max_views_per_group,
+            adaptive=args.adaptive,
+            early_stop=args.early_stop,
+            use_ocr_cache=args.use_ocr_cache,
+            use_product_catalog_cache=args.use_product_catalog_cache,
+            rebuild_product_catalog_cache=args.rebuild_product_catalog_cache,
         )
+        if args.summary_report:
+            try:
+                from src.pipeline_summary import build_pipeline_summary
+
+                build_pipeline_summary(group_result_path=args.output)
+            except Exception as error:
+                print(f"Warning: failed to build summary report: {error}")
         return 0
 
     if args.all or args.image_name is None:

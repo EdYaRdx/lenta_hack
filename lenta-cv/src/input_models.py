@@ -16,6 +16,12 @@ class ImageView:
     y_max: str | float | None = None
     product_id_above_tag: str = ""
     video_filename: str = ""
+    confidence: float | None = None
+    sharpness: float | None = None
+    bbox_width: float | None = None
+    bbox_height: float | None = None
+    center_x: float | None = None
+    center_y: float | None = None
 
 
 @dataclass

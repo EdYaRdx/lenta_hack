@@ -438,7 +438,7 @@ def _write_price_default_debug(
     path = Path(image_path)
     debug_dir = PROJECT_ROOT / "outputs" / "red_price_default_debug"
     debug_dir.mkdir(parents=True, exist_ok=True)
-    debug_path = debug_dir / f"{path.stem}_price_default_debug.txt"
+    debug_path = debug_dir / f"{_debug_stem(path)}_price_default_debug.txt"
     lines = [f"file: {path.name}", f"selected price_default: {selected_price}", "", "attempts:"]
     lines.extend(attempts)
     debug_path.write_text("\n".join(lines), encoding="utf-8")
@@ -514,6 +514,13 @@ def extract_red_price_default(
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _debug_stem(image_path: str | Path) -> str:
+    path = Path(image_path)
+    if len(path.parts) >= 3:
+        return "_".join(path.parts[-3:]).replace(".", "_")
+    return path.stem
 
 
 def _normalize_filter_text(text: str) -> str:
@@ -638,7 +645,7 @@ def _write_product_name_debug(
     path = Path(image_path)
     debug_dir = PROJECT_ROOT / "outputs" / "red_product_name_debug"
     debug_dir.mkdir(parents=True, exist_ok=True)
-    debug_path = debug_dir / f"{path.stem}_product_name_debug.txt"
+    debug_path = debug_dir / f"{_debug_stem(path)}_product_name_debug.txt"
 
     lines = [
         f"file: {path.name}",
