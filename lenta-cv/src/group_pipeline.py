@@ -2,6 +2,7 @@
 
 import csv
 import json
+from time import perf_counter
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +34,7 @@ from src.reference_matcher import (
 from src.reference_store import ReferenceItem, load_reference_csv
 from src.schema import empty_result_row, normalize_result_row
 from src.view_selector import select_initial_views, select_next_views
+from src.timing import PipelineTimer
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -338,8 +340,15 @@ def _write_group_debug_report(
         "processed_view_paths",
         "early_stopped",
         "early_stop_reason",
+        "batch_number_when_stopped",
         "ocr_cache_hits",
         "ocr_cache_misses",
+        "group_seconds",
+        "ocr_seconds",
+        "aggregation_seconds",
+        "catalog_match_seconds",
+        "reference_match_seconds",
+        "normalization_seconds",
         "reference_confidence",
         "reference_score",
         "reference_margin",
@@ -396,8 +405,15 @@ def _write_group_debug_report(
                 "processed_view_paths": " | ".join(optimization.get("processed_view_paths", [])),
                 "early_stopped": optimization.get("early_stopped", ""),
                 "early_stop_reason": optimization.get("early_stop_reason", ""),
+                "batch_number_when_stopped": optimization.get("batch_number_when_stopped", ""),
                 "ocr_cache_hits": optimization.get("cache_hits", ""),
                 "ocr_cache_misses": optimization.get("cache_misses", ""),
+                "group_seconds": optimization.get("group_seconds", ""),
+                "ocr_seconds": optimization.get("ocr_seconds", ""),
+                "aggregation_seconds": optimization.get("aggregation_seconds", ""),
+                "catalog_match_seconds": optimization.get("catalog_match_seconds", ""),
+                "reference_match_seconds": optimization.get("reference_match_seconds", ""),
+                "normalization_seconds": optimization.get("normalization_seconds", ""),
                 "reference_confidence": match.confidence if match else "",
                 "reference_score": match.score if match else "",
                 "reference_margin": match.margin if match else "",
@@ -479,30 +495,56 @@ def parse_grouped_input(
     use_ocr_cache: bool = False,
     use_product_catalog_cache: bool = True,
     rebuild_product_catalog_cache: bool = False,
+    timing_enabled: bool = False,
+    timing_output_dir: str | Path = "outputs",
 ) -> list[dict]:
     """Parse grouped input and save one aggregated row per tag group."""
-    groups = load_grouped_input(input_root)
+    timer = PipelineTimer() if timing_enabled else None
+    total_start = perf_counter() if timer else None
+
+    if timer:
+        with timer.section("load_grouped_input"):
+            groups = load_grouped_input(input_root)
+    else:
+        groups = load_grouped_input(input_root)
     if not groups:
         print(f"No tag groups found in {resolve_project_path(input_root)}")
         save_results([], output_path=output_path)
+        if timer and total_start is not None:
+            timer.add_record("total_run", perf_counter() - total_start)
+            output_dir = resolve_project_path(timing_output_dir)
+            timer.save_csv(output_dir / "timing_report.csv")
+            timer.save_txt(output_dir / "timing_report.txt")
         return []
 
     reference_items: list[ReferenceItem] = []
     if enable_reference_matching:
         if reference_path is None:
             raise ValueError("Reference matching requires reference_path")
-        reference_items = load_reference_csv(reference_path)
+        if timer:
+            with timer.section("load_reference"):
+                reference_items = load_reference_csv(reference_path)
+        else:
+            reference_items = load_reference_csv(reference_path)
         print(f"Loaded reference items: {len(reference_items)}")
 
     product_catalog_index: ProductCatalogIndex | None = None
     if use_product_catalog:
         if product_catalog_path is None:
             raise ValueError("Product catalog matching requires product_catalog_path")
-        product_catalog_index = load_product_catalog_index(
-            product_catalog_path,
-            use_cache=use_product_catalog_cache,
-            rebuild_cache=rebuild_product_catalog_cache,
-        )
+        if timer:
+            with timer.section("load_product_catalog"):
+                product_catalog_index = load_product_catalog_index(
+                    product_catalog_path,
+                    use_cache=use_product_catalog_cache,
+                    rebuild_cache=rebuild_product_catalog_cache,
+                )
+        else:
+            product_catalog_index = load_product_catalog_index(
+                product_catalog_path,
+                use_cache=use_product_catalog_cache,
+                rebuild_cache=rebuild_product_catalog_cache,
+            )
         print(f"Loaded product catalog items: {len(product_catalog_index.items)}")
 
     results: list[dict[str, Any]] = []
@@ -517,13 +559,53 @@ def parse_grouped_input(
     skipped_reference_fields_by_group: dict[str, dict[str, dict[str, Any]]] = {}
     enriched_fields_by_group: dict[str, dict[str, dict[str, Any]]] = {}
     optimization_by_group: dict[str, dict[str, Any]] = {}
+    grouped_start = perf_counter() if timer else None
+    def _match_catalog_row(
+        row: dict[str, Any],
+        candidates: list[ParsedCandidate],
+    ) -> tuple[dict[str, Any], ProductCatalogMatch | None, dict[str, dict[str, Any]], bool]:
+        if not (use_product_catalog and product_catalog_index is not None):
+            return row, None, {}, False
+
+        catalog_match = product_catalog_index.search(str(row.get("product_name", "")))
+        if catalog_match.confidence == "conflict":
+            query_texts = [str(row.get("product_name", ""))]
+            query_texts.extend(
+                str(candidate.row.get("product_name", ""))
+                for candidate in candidates
+                if candidate.row.get("product_name")
+            )
+            top_items = product_catalog_index.top_items_from_candidates(
+                catalog_match.top_candidates,
+                limit=5,
+            )
+            catalog_match = resolve_catalog_conflict_by_tokens(
+                query_texts,
+                top_items,
+                catalog_match,
+            )
+
+        enriched_row, catalog_changes = enrich_product_name_from_catalog(
+            row,
+            catalog_match,
+        )
+        conflict_resolved = bool(
+            catalog_match is not None
+            and catalog_match.conflict_resolution
+            and catalog_match.conflict_resolution.get("resolved")
+        )
+        return enriched_row, catalog_match, catalog_changes, conflict_resolved
+
     for group in groups:
+        group_start = perf_counter()
         reset_ocr_cache_stats()
         candidates: list[ParsedCandidate] = []
         selected_paths: set[str] = set()
         processed_view_paths: list[str] = []
         early_stopped = False
         early_stop_reason = ""
+        stop_batch_number: int | None = None
+        batch_number = 0
 
         if use_view_selection:
             batch = select_initial_views(group.views, limit=initial_views)
@@ -542,8 +624,14 @@ def parse_grouped_input(
         row_after_reference: dict[str, Any] = {}
         enriched_fields: dict[str, dict[str, Any]] = {}
         skipped_reference_fields: dict[str, Any] = {}
+        ocr_seconds = 0.0
+        aggregation_seconds = 0.0
+        catalog_match_seconds = 0.0
+        reference_match_seconds = 0.0
+        normalization_seconds = 0.0
 
         while batch:
+            batch_number += 1
             for view in batch:
                 key = _view_key(view)
                 if key in selected_paths:
@@ -551,14 +639,53 @@ def parse_grouped_input(
                 selected_paths.add(key)
                 processed_view_paths.append(str(view.image_path))
 
-            candidates.extend(_parse_view_batch(group, batch, use_ocr_cache=use_ocr_cache))
-            final_row, field_sources = _aggregate_current_candidates(group, candidates)
+            if timer:
+                with timer.section("group_ocr", group_id=group.group_id, batch_views=len(batch)) as record:
+                    candidates.extend(_parse_view_batch(group, batch, use_ocr_cache=use_ocr_cache))
+                ocr_seconds += record["seconds"]
+            else:
+                candidates.extend(_parse_view_batch(group, batch, use_ocr_cache=use_ocr_cache))
+
+            if timer:
+                with timer.section("group_aggregation", group_id=group.group_id) as record:
+                    final_row, field_sources = _aggregate_current_candidates(group, candidates)
+                aggregation_seconds += record["seconds"]
+            else:
+                final_row, field_sources = _aggregate_current_candidates(group, candidates)
+
+            temp_row = final_row
+            temp_catalog_match = None
+            temp_conflict_resolved = False
+            if use_product_catalog and product_catalog_index is not None:
+                if timer:
+                    with timer.section("group_catalog_match", group_id=group.group_id) as record:
+                        temp_row, temp_catalog_match, _temp_changes, temp_conflict_resolved = _match_catalog_row(
+                            temp_row,
+                            candidates,
+                        )
+                    catalog_match_seconds += record["seconds"]
+                else:
+                    temp_row, temp_catalog_match, _temp_changes, temp_conflict_resolved = _match_catalog_row(
+                        temp_row,
+                        candidates,
+                    )
 
             if enable_reference_matching:
-                reference_match = match_reference_row(final_row, reference_items)
-                if early_stop and should_early_stop(reference_match, final_row):
+                if timer:
+                    with timer.section("group_reference_match", group_id=group.group_id) as record:
+                        reference_match = match_reference_row(temp_row, reference_items)
+                    reference_match_seconds += record["seconds"]
+                else:
+                    reference_match = match_reference_row(temp_row, reference_items)
+                if early_stop and should_early_stop(reference_match, temp_row):
                     early_stopped = True
-                    early_stop_reason = "high confidence reference match"
+                    stop_batch_number = batch_number
+                    if batch_number == 1:
+                        early_stop_reason = "reference_high_after_initial_batch"
+                    elif temp_conflict_resolved:
+                        early_stop_reason = "reference_high_after_catalog_conflict_resolution"
+                    else:
+                        early_stop_reason = "reference_high_after_adaptive_batch"
                     break
 
             if not (use_view_selection and enable_reference_matching and adaptive):
@@ -575,29 +702,25 @@ def parse_grouped_input(
         if not final_row:
             final_row, field_sources = _aggregate_current_candidates(group, candidates)
 
+        if not early_stop:
+            early_stop_reason = "disabled"
+        elif not early_stopped:
+            early_stop_reason = "no_high_match"
+
         rows_before_catalog[group.group_id] = dict(final_row)
         if use_product_catalog and product_catalog_index is not None:
-            product_catalog_match = product_catalog_index.search(str(final_row.get("product_name", "")))
-            if product_catalog_match.confidence == "conflict":
-                query_texts = [str(final_row.get("product_name", ""))]
-                query_texts.extend(
-                    str(candidate.row.get("product_name", ""))
-                    for candidate in candidates
-                    if candidate.row.get("product_name")
+            if timer:
+                with timer.section("group_catalog_match", group_id=group.group_id) as record:
+                    final_row, product_catalog_match, catalog_enriched_fields, _conflict_resolved = _match_catalog_row(
+                        final_row,
+                        candidates,
+                    )
+                catalog_match_seconds += record["seconds"]
+            else:
+                final_row, product_catalog_match, catalog_enriched_fields, _conflict_resolved = _match_catalog_row(
+                    final_row,
+                    candidates,
                 )
-                top_items = product_catalog_index.top_items_from_candidates(
-                    product_catalog_match.top_candidates,
-                    limit=5,
-                )
-                product_catalog_match = resolve_catalog_conflict_by_tokens(
-                    query_texts,
-                    top_items,
-                    product_catalog_match,
-                )
-            final_row, catalog_enriched_fields = enrich_product_name_from_catalog(
-                final_row,
-                product_catalog_match,
-            )
             if catalog_enriched_fields:
                 _mark_catalog_field_sources(field_sources, catalog_enriched_fields)
             if product_catalog_match is not None:
@@ -616,15 +739,28 @@ def parse_grouped_input(
         row_before_reference = dict(final_row)
         row_after_catalog = dict(final_row)
         if enable_reference_matching:
-            reference_match = match_reference_row(
-                final_row,
-                reference_items,
-                used_catalog_product_name=used_catalog_product_name,
-            )
-            enriched_row, enriched_fields, skipped_reference_fields = enrich_row_from_reference_with_trace(
-                final_row,
-                reference_match,
-            )
+            if timer:
+                with timer.section("group_reference_match", group_id=group.group_id) as record:
+                    reference_match = match_reference_row(
+                        final_row,
+                        reference_items,
+                        used_catalog_product_name=used_catalog_product_name,
+                    )
+                    enriched_row, enriched_fields, skipped_reference_fields = enrich_row_from_reference_with_trace(
+                        final_row,
+                        reference_match,
+                    )
+                reference_match_seconds += record["seconds"]
+            else:
+                reference_match = match_reference_row(
+                    final_row,
+                    reference_items,
+                    used_catalog_product_name=used_catalog_product_name,
+                )
+                enriched_row, enriched_fields, skipped_reference_fields = enrich_row_from_reference_with_trace(
+                    final_row,
+                    reference_match,
+                )
             if enriched_fields:
                 _mark_reference_field_sources(field_sources, enriched_fields)
             row_after_reference = dict(enriched_row)
@@ -634,6 +770,14 @@ def parse_grouped_input(
             enriched_fields_by_group[group.group_id] = enriched_fields
 
         cache_stats = get_ocr_cache_stats()
+        catalog_confidence = "none"
+        if product_catalog_match is not None:
+            conflict_resolved = bool(
+                product_catalog_match.conflict_resolution
+                and product_catalog_match.conflict_resolution.get("resolved")
+            )
+            catalog_confidence = "conflict_resolved" if conflict_resolved else product_catalog_match.confidence
+        group_seconds = perf_counter() - group_start
         optimization = {
             "total_views": len(group.views),
             "processed_views": len(selected_paths),
@@ -642,15 +786,43 @@ def parse_grouped_input(
             "processed_view_paths": processed_view_paths,
             "early_stopped": early_stopped,
             "early_stop_reason": early_stop_reason,
+            "batch_number_when_stopped": stop_batch_number or "",
             "use_ocr_cache": use_ocr_cache,
             "cache_hits": cache_stats.get("hits", 0),
             "cache_misses": cache_stats.get("misses", 0),
             "adaptive": adaptive,
             "max_views_per_group": max_views_per_group if max_views_per_group is not None else "",
+            "group_seconds": round(group_seconds, 6),
+            "ocr_seconds": round(ocr_seconds, 6),
+            "aggregation_seconds": round(aggregation_seconds, 6),
+            "catalog_match_seconds": round(catalog_match_seconds, 6),
+            "reference_match_seconds": round(reference_match_seconds, 6),
+            "normalization_seconds": round(normalization_seconds, 6),
         }
         optimization_by_group[group.group_id] = optimization
 
-        final_row = normalize_output_row(final_row)
+        if timer:
+            timer.add_record(
+                "group_total",
+                group_seconds,
+                group_id=group.group_id,
+                total_views=len(group.views),
+                processed_views=len(selected_paths),
+                skipped_views=max(len(group.views) - len(selected_paths), 0),
+                early_stopped=early_stopped,
+                reference_confidence=reference_match.confidence if reference_match else "",
+                catalog_confidence=catalog_confidence,
+                ocr_seconds=round(ocr_seconds, 6),
+                cache_hits=cache_stats.get("hits", 0),
+                cache_misses=cache_stats.get("misses", 0),
+            )
+
+        if timer:
+            with timer.section("group_normalization", group_id=group.group_id) as record:
+                final_row = normalize_output_row(final_row)
+            normalization_seconds += record["seconds"]
+        else:
+            final_row = normalize_output_row(final_row)
         results.append(final_row)
         rows_before_reference[group.group_id] = row_before_reference
         rows_after_reference[group.group_id] = row_after_reference or dict(final_row)
@@ -672,7 +844,11 @@ def parse_grouped_input(
         )
 
     results = normalize_output_rows(results)
-    saved_path = save_results(results, output_path=output_path)
+    if timer:
+        with timer.section("export"):
+            saved_path = save_results(results, output_path=output_path)
+    else:
+        saved_path = save_results(results, output_path=output_path)
     _write_group_debug_report(
         groups,
         candidates_by_group,
@@ -704,6 +880,29 @@ def parse_grouped_input(
     print(f"Saved grouped CSV: {saved_path}")
     print(f"Saved group debug report: {DEBUG_REPORT_PATH}")
     print(f"Processed tag groups: {len(results)}")
+    if timer:
+        if grouped_start is not None:
+            timer.add_record("grouped_processing", perf_counter() - grouped_start)
+        if total_start is not None:
+            timer.add_record("total_run", perf_counter() - total_start)
+        output_dir = resolve_project_path(timing_output_dir)
+        timer.save_csv(output_dir / "timing_report.csv")
+        timer.save_txt(output_dir / "timing_report.txt")
+        summary = timer.summary()
+        total_seconds = summary.get("total_seconds", 0.0)
+        processed_views = sum(item.get("processed_views", 0) for item in optimization_by_group.values())
+        total_views = sum(item.get("total_views", 0) for item in optimization_by_group.values())
+        avg_per_view = (total_seconds / processed_views) if processed_views else 0.0
+        slowest_group = summary.get("slowest_group", "")
+        slowest_seconds = summary.get("slowest_group_seconds", 0.0)
+        print("Timing:")
+        print(f"- total: {total_seconds:.2f} sec")
+        print(f"- groups: {len(results)}")
+        print(f"- processed views: {processed_views} / {total_views}")
+        print(f"- avg per processed view: {avg_per_view:.4f} sec")
+        if slowest_group:
+            print(f"- slowest group: {slowest_group}, {slowest_seconds:.2f} sec")
+        print(f"- timing report: {output_dir / 'timing_report.txt'}")
     return results
 
 

@@ -182,6 +182,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Reference CSV path for grouped matching, relative to project root or absolute.",
     )
     parser.add_argument(
+        "--reference-mode",
+        choices=("auto", "off", "forced"),
+        default="auto",
+        help="Reference selection mode for grouped input. Auto reads input_root/name.json.",
+    )
+    parser.add_argument(
+        "--reference-dir",
+        default="data/reference/references",
+        help="Directory with department reference CSV files for --reference-mode auto.",
+    )
+    parser.add_argument(
         "--use-reference",
         action="store_true",
         help="Enable reference matching/enrichment for grouped input.",
@@ -282,6 +293,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Build pipeline summary reports after grouped processing.",
     )
     parser.add_argument(
+        "--timing-report",
+        action="store_true",
+        help="Generate timing reports for grouped processing.",
+    )
+    parser.add_argument(
+        "--timing-output-dir",
+        default="outputs",
+        help="Directory for timing reports, relative to project root or absolute.",
+    )
+    parser.add_argument(
         "--clear-ocr-cache",
         action="store_true",
         help="Clear outputs/ocr_cache and exit.",
@@ -305,17 +326,40 @@ def main(argv: list[str] | None = None) -> int:
     if args.grouped:
         if not args.input_root:
             parser.error("--grouped requires --input-root")
-        if args.use_reference and not args.reference:
-            parser.error("--use-reference requires --reference")
         if args.use_product_catalog and not args.product_catalog:
             parser.error("--use-product-catalog requires --product-catalog")
         from src.group_pipeline import parse_grouped_input
+        selected_reference = args.reference
+        enable_reference = args.use_reference
+        if args.use_reference:
+            from src.reference_manager import select_reference_by_department
+
+            reference_mode = "forced" if args.reference else args.reference_mode
+            selection = select_reference_by_department(
+                args.input_root,
+                reference_dir=args.reference_dir,
+                reference_mode=reference_mode,
+                forced_reference=args.reference,
+            )
+            print(
+                "Reference selection: "
+                f"enabled={selection.enabled} "
+                f"mode={selection.mode} "
+                f"department={selection.department} "
+                f"reference_key={selection.reference_key} "
+                f"path={selection.reference_path} "
+                f"reason={selection.reason}"
+            )
+            if not selection.enabled:
+                print(f"Warning: reference disabled ({selection.reason})")
+            selected_reference = selection.reference_path or None
+            enable_reference = selection.enabled
 
         parse_grouped_input(
             args.input_root,
             output_path=args.output,
-            reference_path=args.reference,
-            enable_reference_matching=args.use_reference,
+            reference_path=selected_reference,
+            enable_reference_matching=enable_reference,
             product_catalog_path=args.product_catalog,
             use_product_catalog=args.use_product_catalog,
             use_view_selection=args.use_view_selection,
@@ -327,6 +371,8 @@ def main(argv: list[str] | None = None) -> int:
             use_ocr_cache=args.use_ocr_cache,
             use_product_catalog_cache=args.use_product_catalog_cache,
             rebuild_product_catalog_cache=args.rebuild_product_catalog_cache,
+            timing_enabled=args.timing_report,
+            timing_output_dir=args.timing_output_dir,
         )
         if args.summary_report:
             try:
@@ -338,6 +384,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.all or args.image_name is None:
+        if args.timing_report:
+            print("Warning: --timing-report is only supported for grouped runs.")
         run_all_images(
             preprocess=should_preprocess,
             input_dir=args.input_dir,
@@ -345,6 +393,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
 
+    if args.timing_report:
+        print("Warning: --timing-report is only supported for grouped runs.")
     row, _ = run_one_image(
         args.image_name,
         preprocess=should_preprocess,

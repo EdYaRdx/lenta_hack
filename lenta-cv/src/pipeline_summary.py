@@ -13,6 +13,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 OUTPUT_DIR = PROJECT_ROOT / "outputs"
 SUMMARY_CSV_PATH = OUTPUT_DIR / "pipeline_summary_report.csv"
 SUMMARY_TXT_PATH = OUTPUT_DIR / "pipeline_summary_report.txt"
+TIMING_REPORT_PATH = OUTPUT_DIR / "timing_report.csv"
 
 
 def resolve_project_path(path: str | Path) -> Path:
@@ -89,6 +90,7 @@ def build_pipeline_summary(
     debug_rows = _read_csv_rows(group_debug_path)
     reference_rows = _read_csv_rows(reference_report_path)
     catalog_rows = _read_csv_rows(catalog_report_path)
+    timing_rows = _read_csv_rows(TIMING_REPORT_PATH)
 
     group_ids = {row.get("filename", "") for row in group_rows if row.get("filename")}
     group_ids.update(row.get("group_id", "") for row in debug_rows if row.get("group_id"))
@@ -109,6 +111,24 @@ def build_pipeline_summary(
     early_stopped_count = sum(1 for row in debug_rows if _safe_bool(row.get("early_stopped")))
     ocr_cache_hits = sum(_safe_int(row.get("ocr_cache_hits")) for row in debug_rows)
     ocr_cache_misses = sum(_safe_int(row.get("ocr_cache_misses")) for row in debug_rows)
+
+    group_seconds_total = sum(float(row.get("group_seconds", 0) or 0) for row in debug_rows)
+    ocr_seconds_total = sum(float(row.get("ocr_seconds", 0) or 0) for row in debug_rows)
+    catalog_seconds_total = sum(float(row.get("catalog_match_seconds", 0) or 0) for row in debug_rows)
+    reference_seconds_total = sum(float(row.get("reference_match_seconds", 0) or 0) for row in debug_rows)
+
+    slowest_group = ""
+    slowest_group_seconds = 0.0
+    slowest_group_processed = 0
+    slowest_group_early_stopped = False
+    for row in debug_rows:
+        group_id = str(row.get("group_id", "")).strip()
+        seconds = float(row.get("group_seconds", 0) or 0)
+        if group_id and seconds >= slowest_group_seconds:
+            slowest_group_seconds = seconds
+            slowest_group = group_id
+            slowest_group_processed = _safe_int(row.get("processed_views"))
+            slowest_group_early_stopped = _safe_bool(row.get("early_stopped"))
 
     reference_counts = {
         "high": 0,
@@ -185,6 +205,50 @@ def build_pipeline_summary(
 
     processed_views_ratio = round(processed_views / total_views, 3) if total_views else 0.0
 
+    timing_summary: dict[str, Any] = {}
+    timing_available = bool(timing_rows)
+    if timing_available:
+        stage_totals: dict[str, float] = {}
+        group_totals: dict[str, float] = {}
+        for row in timing_rows:
+            stage = str(row.get("stage", "")).strip()
+            seconds = float(row.get("seconds", 0) or 0)
+            stage_totals[stage] = stage_totals.get(stage, 0.0) + seconds
+            if stage == "group_total":
+                group_id = str(row.get("group_id", "")).strip()
+                if group_id:
+                    group_totals[group_id] = group_totals.get(group_id, 0.0) + seconds
+
+        total_seconds = stage_totals.get("total_run", 0.0)
+        if not total_seconds:
+            total_seconds = stage_totals.get("grouped_processing", 0.0)
+        if not total_seconds:
+            total_seconds = sum(group_totals.values())
+
+        slowest_group = ""
+        slowest_group_seconds = 0.0
+        if group_totals:
+            slowest_group, slowest_group_seconds = max(group_totals.items(), key=lambda item: item[1])
+
+        avg_seconds_per_group = (total_seconds / len(group_totals)) if group_totals else 0.0
+        avg_seconds_per_processed_view = (total_seconds / processed_views) if processed_views else 0.0
+
+        timing_summary = {
+            "total_seconds": round(total_seconds, 3),
+            "avg_seconds_per_group": round(avg_seconds_per_group, 3),
+            "avg_seconds_per_processed_view": round(avg_seconds_per_processed_view, 4),
+            "slowest_group": slowest_group,
+            "slowest_group_seconds": round(slowest_group_seconds, 3),
+            "catalog_load_seconds": round(stage_totals.get("load_product_catalog", 0.0), 3),
+            "reference_load_seconds": round(stage_totals.get("load_reference", 0.0), 3),
+            "group_processing_seconds": round(stage_totals.get("grouped_processing", 0.0), 3),
+        }
+
+    avg_group_seconds = (group_seconds_total / len(debug_rows)) if debug_rows else 0.0
+    avg_ocr_seconds_per_processed_view = (ocr_seconds_total / processed_views) if processed_views else 0.0
+    avg_catalog_match_seconds_per_group = (catalog_seconds_total / len(debug_rows)) if debug_rows else 0.0
+    avg_reference_match_seconds_per_group = (reference_seconds_total / len(debug_rows)) if debug_rows else 0.0
+
     summary = {
         "total_groups": len(group_ids),
         "rows_in_output": len(group_rows),
@@ -209,7 +273,16 @@ def build_pipeline_summary(
         "groups_with_empty_product_name": len(groups_with_empty_product_name),
         "groups_with_empty_qr": len(groups_with_empty_qr),
         "problematic_groups": " | ".join(sorted(problematic_groups)) if problematic_groups else "none",
+        "avg_group_seconds": round(avg_group_seconds, 3),
+        "avg_ocr_seconds_per_processed_view": round(avg_ocr_seconds_per_processed_view, 4),
+        "avg_catalog_match_seconds_per_group": round(avg_catalog_match_seconds_per_group, 4),
+        "avg_reference_match_seconds_per_group": round(avg_reference_match_seconds_per_group, 4),
+        "slowest_group": slowest_group,
+        "slowest_group_seconds": round(slowest_group_seconds, 3),
+        "slowest_group_processed_views": slowest_group_processed,
+        "slowest_group_early_stopped": slowest_group_early_stopped,
     }
+    summary.update(timing_summary)
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     with SUMMARY_CSV_PATH.open("w", newline="", encoding="utf-8-sig") as csv_file:
@@ -238,6 +311,27 @@ def build_pipeline_summary(
         f"OCR cache misses: {summary['ocr_cache_misses']}",
         f"Problematic groups: {summary['problematic_groups']}",
     ]
+    if timing_available:
+        summary_lines.extend([
+            "",
+            "Timing:",
+            f"- total_seconds: {summary.get('total_seconds', 0.0)}",
+            f"- avg_seconds_per_group: {summary.get('avg_seconds_per_group', 0.0)}",
+            f"- avg_seconds_per_processed_view: {summary.get('avg_seconds_per_processed_view', 0.0)}",
+            f"- slowest_group: {summary.get('slowest_group', '')}",
+            f"- slowest_group_seconds: {summary.get('slowest_group_seconds', 0.0)}",
+            f"- slowest_group_processed_views: {summary.get('slowest_group_processed_views', 0)}",
+            f"- slowest_group_early_stopped: {summary.get('slowest_group_early_stopped', False)}",
+            f"- catalog_load_seconds: {summary.get('catalog_load_seconds', 0.0)}",
+            f"- reference_load_seconds: {summary.get('reference_load_seconds', 0.0)}",
+            f"- group_processing_seconds: {summary.get('group_processing_seconds', 0.0)}",
+            f"- avg_group_seconds: {summary.get('avg_group_seconds', 0.0)}",
+            f"- avg_ocr_seconds_per_processed_view: {summary.get('avg_ocr_seconds_per_processed_view', 0.0)}",
+            f"- avg_catalog_match_seconds_per_group: {summary.get('avg_catalog_match_seconds_per_group', 0.0)}",
+            f"- avg_reference_match_seconds_per_group: {summary.get('avg_reference_match_seconds_per_group', 0.0)}",
+        ])
+    else:
+        summary_lines.extend(["", "Timing: timing not available"])
     SUMMARY_TXT_PATH.write_text("\n".join(summary_lines), encoding="utf-8-sig")
 
     print(f"Saved pipeline summary: {SUMMARY_CSV_PATH}")
